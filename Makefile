@@ -6,11 +6,14 @@ OUT_DIR?=./_output
 
 VERSION?=latest
 
-.PHONY: all build-test-adapter test verify-gofmt gofmt verify test-adapter-container
+.PHONY: all build-gud-adapter build-test-adapter test verify-gofmt gofmt verify test-adapter-container
 
 all: build-test-adapter
 build-test-adapter: vendor
 	CGO_ENABLED=0 GOARCH=$(ARCH) go build -o $(OUT_DIR)/$(ARCH)/test-adapter github.com/kubernetes-incubator/custom-metrics-apiserver/test-adapter
+
+build-gud-adapter: vendor
+	CGO_ENABLED=0 GOARCH=$(ARCH) go build -o $(OUT_DIR)/$(ARCH)/gud-adapter github.com/kubernetes-incubator/custom-metrics-apiserver/gud-adapter
 
 vendor: glide.lock
 	glide install -v
