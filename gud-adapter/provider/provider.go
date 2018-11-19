@@ -23,7 +23,7 @@ import (
 
 	//"github.com/golang/glog"
 
-	apierr "k8s.io/apimachinery/pkg/api/errors"
+	//apierr "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,10 +32,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/metrics/pkg/apis/custom_metrics"
-	"k8s.io/metrics/pkg/apis/external_metrics"
+	//"k8s.io/metrics/pkg/apis/external_metrics"
 
 	"github.com/kubernetes-incubator/custom-metrics-apiserver/pkg/provider"
-	"github.com/kubernetes-incubator/custom-metrics-apiserver/pkg/provider/helpers"
+	//"github.com/kubernetes-incubator/custom-metrics-apiserver/pkg/provider/helpers"
 )
 
 const serviceExpiry = 30 * time.Second
@@ -47,14 +47,6 @@ type CustomMetricResource struct {
 	types.NamespacedName
 }
 
-// externalMetric provides examples for metrics which would otherwise be reported from an external source
-// TODO (damemi): add dynamic external metrics instead of just hardcoded examples
-type externalMetric struct {
-	info   provider.ExternalMetricInfo
-	labels map[string]string
-	value  external_metrics.ExternalMetricValue
-}
-
 // testingProvider is a sample implementation of provider.MetricsProvider which stores a map of fake metrics
 type StatsdProvider struct {
 	client dynamic.Interface
@@ -62,55 +54,9 @@ type StatsdProvider struct {
 
 	listener *net.UDPConn
 
-	valuesLock sync.RWMutex
-	values     map[string]ServiceData
-
-	externalMetrics []externalMetric
-}
-
-type ServiceData struct {
-	// Mapping between service name -> service instance.
-	Services map[string]ServiceInstance
-}
-
-func NewServiceData() ServiceData {
-	return ServiceData{
-		Services: make(map[string]ServiceInstance),
-	}
-}
-
-func (data *ServiceData) Count(name string) int {
-	data.Clean()
-
-	count := 0
-	for ident, instance := range data.Services {
-		if time.Now().Sub(instance.Timestamp) < serviceExpiry {
-			count += instance.Data.Depth
-		}
-	}
-
-	return count
-}
-
-// Clean removes any instances that stopped responding.
-func (data *ServiceData) Clean() {
-	for ident, instance := range data.Services {
-		if time.Now().Sub(instance.Timestamp) > serviceExpiry {
-			delete(data.Services, ident)
-		}
-	}
-}
-
-type ServiceInstance struct {
-	Timestamp time.Time
-	Data      ServiceDepth
-}
-
-func NewServiceInstance(data ServiceDepth) ServiceInstance {
-	return ServiceInstance{
-		Timestamp: time.Now(),
-		Data:      data,
-	}
+	servicesLock sync.RWMutex
+	// Mapping between service name -> service queue data.
+	services map[string]*ServiceData
 }
 
 func NewStatsdProvider(client dynamic.Interface, mapper apimeta.RESTMapper, address string) (*StatsdProvider, error) {
@@ -128,10 +74,72 @@ func NewStatsdProvider(client dynamic.Interface, mapper apimeta.RESTMapper, addr
 		client:   client,
 		mapper:   mapper,
 		listener: udpConn,
-		values:   make(map[string]ServiceData),
+		services: make(map[string]*ServiceData),
 	}
 
 	return provider, nil
+}
+
+func (statsd *StatsdProvider) AddServiceDepth(depth ServiceDepth) {
+	statsd.servicesLock.Lock()
+	defer statsd.servicesLock.Unlock()
+
+	data, ok := statsd.services[depth.Name]
+	if !ok {
+		data = NewServiceData()
+		statsd.services[depth.Name] = data
+	}
+
+	data.AddServiceDepth(depth)
+}
+
+type ServiceData struct {
+	// Mapping between service ident -> service instance.
+	Services map[string]ServiceInstance
+}
+
+func NewServiceData() *ServiceData {
+	return &ServiceData{
+		Services: make(map[string]ServiceInstance),
+	}
+}
+
+func (data *ServiceData) Count() int64 {
+	data.Clean()
+
+	var count int64
+	for _, instance := range data.Services {
+		if time.Now().Sub(instance.Timestamp) < serviceExpiry {
+			count += instance.Data.Depth
+		}
+	}
+
+	return count
+}
+
+// Clean removes any instances that stopped responding.
+func (data *ServiceData) Clean() {
+	for ident, instance := range data.Services {
+		if time.Now().Sub(instance.Timestamp) > serviceExpiry {
+			delete(data.Services, ident)
+		}
+	}
+}
+
+func (data *ServiceData) AddServiceDepth(depth ServiceDepth) {
+	data.Services[depth.Ident] = NewServiceInstance(depth)
+}
+
+type ServiceInstance struct {
+	Timestamp time.Time
+	Data      ServiceDepth
+}
+
+func NewServiceInstance(data ServiceDepth) ServiceInstance {
+	return ServiceInstance{
+		Timestamp: time.Now(),
+		Data:      data,
+	}
 }
 
 // updateMetric writes the metric provided by a restful request and stores it in memory
@@ -244,63 +252,46 @@ func NewStatsdProvider(client dynamic.Interface, mapper apimeta.RESTMapper, addr
 //}
 
 func (p *StatsdProvider) GetMetricByName(name types.NamespacedName, info provider.CustomMetricInfo) (*custom_metrics.MetricValue, error) {
-	p.valuesLock.RLock()
-	defer p.valuesLock.RUnlock()
+	p.servicesLock.RLock()
+	defer p.servicesLock.RUnlock()
 
-	return nil, nil
-}
-
-func (p *StatsdProvider) GetMetricBySelector(namespace string, selector labels.Selector, info provider.CustomMetricInfo) (*custom_metrics.MetricValueList, error) {
-	p.valuesLock.RLock()
-	defer p.valuesLock.RUnlock()
-
-	return nil, nil
-}
-
-func (p *StatsdProvider) ListAllMetrics() []provider.CustomMetricInfo {
-	p.valuesLock.RLock()
-	defer p.valuesLock.RUnlock()
-
-	// Get unique CustomMetricInfos from wrapper CustomMetricResources
-	infos := make(map[provider.CustomMetricInfo]struct{})
-	for resource := range p.values {
-		infos[resource.CustomMetricInfo] = struct{}{}
+	data, ok := p.services[info.Metric]
+	var count int64
+	if ok {
+		count = data.Count()
 	}
 
-	// Build slice of CustomMetricInfos to be returns
-	metrics := make([]provider.CustomMetricInfo, 0, len(infos))
-	for info := range infos {
-		metrics = append(metrics, info)
-	}
-
-	return metrics
-}
-
-func (p *StatsdProvider) GetExternalMetric(namespace string, metricSelector labels.Selector, info provider.ExternalMetricInfo) (*external_metrics.ExternalMetricValueList, error) {
-	p.valuesLock.RLock()
-	defer p.valuesLock.RUnlock()
-
-	matchingMetrics := []external_metrics.ExternalMetricValue{}
-	for _, metric := range p.externalMetrics {
-		if metric.info.Metric == info.Metric &&
-			metricSelector.Matches(labels.Set(metric.labels)) {
-			metricValue := metric.value
-			metricValue.Timestamp = metav1.Now()
-			matchingMetrics = append(matchingMetrics, metricValue)
-		}
-	}
-	return &external_metrics.ExternalMetricValueList{
-		Items: matchingMetrics,
+	return &custom_metrics.MetricValue{
+		MetricName: info.Metric,
+		Timestamp:  metav1.Time{time.Now()},
+		Value:      *resource.NewQuantity(count, resource.DecimalSI),
 	}, nil
 }
 
-func (p *StatsdProvider) ListAllExternalMetrics() []provider.ExternalMetricInfo {
-	p.valuesLock.RLock()
-	defer p.valuesLock.RUnlock()
-
-	externalMetricsInfo := []provider.ExternalMetricInfo{}
-	for _, metric := range p.externalMetrics {
-		externalMetricsInfo = append(externalMetricsInfo, metric.info)
+func (p *StatsdProvider) GetMetricBySelector(namespace string, selector labels.Selector, info provider.CustomMetricInfo) (*custom_metrics.MetricValueList, error) {
+	p.servicesLock.RLock()
+	defer p.servicesLock.RUnlock()
+	metric, err := p.GetMetricByName(types.NamespacedName{Namespace: namespace, Name: info.Metric}, info)
+	if err != nil {
+		return nil, err
 	}
-	return externalMetricsInfo
+
+	return &custom_metrics.MetricValueList{
+		Items: []custom_metrics.MetricValue{*metric},
+	}, nil
+}
+
+func (p *StatsdProvider) ListAllMetrics() []provider.CustomMetricInfo {
+	p.servicesLock.RLock()
+	defer p.servicesLock.RUnlock()
+
+	// Build slice of CustomMetricInfos to be returns
+	metrics := make([]provider.CustomMetricInfo, 0, len(p.services))
+	for metricName := range p.services {
+		metrics = append(metrics, provider.CustomMetricInfo{
+			Metric: metricName,
+		})
+	}
+
+	return metrics
 }

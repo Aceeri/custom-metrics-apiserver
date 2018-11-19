@@ -28,6 +28,7 @@ func (statsd *StatsdProvider) ListenForStatsd(ctx context.Context) error {
 			}
 
 			glog.Infof("Parsed: %+v", parsed)
+			statsd.AddServiceDepth(*parsed)
 		}
 	}
 }
@@ -37,7 +38,7 @@ type ServiceDepth struct {
 	Sector  string
 	Ident   string
 	Address string
-	Depth   int
+	Depth   int64
 }
 
 // Parse a subset of statsd packets that is in the format of:
@@ -84,7 +85,7 @@ func ParsePacket(packet []byte) (*ServiceDepth, error) {
 		return nil, fmt.Errorf("Error while taking queue depth: %s", err)
 	}
 
-	depth.Depth, err = strconv.Atoi(queueDepth)
+	depth.Depth, err = strconv.ParseInt(queueDepth, 10, 64)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to convert depth (%s) to integer: %s", queueDepth, err)
 	}

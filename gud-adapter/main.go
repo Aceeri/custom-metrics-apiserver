@@ -40,8 +40,6 @@ type Adapter struct {
 }
 
 func (a *Adapter) makeProvider() (*statsdProvider.StatsdProvider, error) {
-	client := nil
-	mapper := nil
 	//client, err := a.DynamicClient()
 	//if err != nil {
 	//return nil, fmt.Errorf("unable to construct dynamic client: %v", err)
@@ -52,7 +50,7 @@ func (a *Adapter) makeProvider() (*statsdProvider.StatsdProvider, error) {
 	//return nil, fmt.Errorf("unable to construct discovery REST mapper: %v", err)
 	//}
 
-	provider, err := statsdProvider.NewStatsdProvider(client, mapper, ":8125")
+	provider, err := statsdProvider.NewStatsdProvider(nil, nil, ":8125")
 	return provider, err
 }
 
@@ -77,7 +75,6 @@ func main() {
 	go statsd.ListenForStatsd(ctx)
 
 	adapter.WithCustomMetrics(statsd)
-	adapter.WithExternalMetrics(statsd)
 
 	glog.Infof(adapter.Message)
 
