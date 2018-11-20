@@ -80,6 +80,15 @@ func NewStatsdProvider(client dynamic.Interface, mapper apimeta.RESTMapper, addr
 	return provider, nil
 }
 
+func (statsd *StatsdProvider) Count(name string) int64 {
+	data, ok := p.services[name]
+	if ok {
+		return data.Count()
+	}
+
+	return 0
+}
+
 func (statsd *StatsdProvider) AddServiceDepth(depth ServiceDepth) {
 	statsd.servicesLock.Lock()
 	defer statsd.servicesLock.Unlock()
@@ -142,124 +151,11 @@ func NewServiceInstance(data ServiceDepth) ServiceInstance {
 	}
 }
 
-// updateMetric writes the metric provided by a restful request and stores it in memory
-//func (p *testingProvider) updateMetric(request *restful.Request, response *restful.Response) {
-//p.valuesLock.Lock()
-//defer p.valuesLock.Unlock()
-
-//namespace := request.PathParameter("namespace")
-//resourceType := request.PathParameter("resourceType")
-//namespaced := false
-//if len(namespace) > 0 || resourceType == "namespaces" {
-//namespaced = true
-//}
-//name := request.PathParameter("name")
-//metricName := request.PathParameter("metric")
-
-//value := new(resource.Quantity)
-//err := request.ReadEntity(value)
-//if err != nil {
-//response.WriteErrorString(http.StatusBadRequest, err.Error())
-//return
-//}
-
-//groupResource := schema.ParseGroupResource(resourceType)
-
-//info := provider.CustomMetricInfo{
-//GroupResource: groupResource,
-//Metric:        metricName,
-//Namespaced:    namespaced,
-//}
-
-//info, _, err = info.Normalized(p.mapper)
-//if err != nil {
-//glog.Errorf("Error normalizing info: %s", err)
-//}
-//namespacedName := types.NamespacedName{
-//Name:      name,
-//Namespace: namespace,
-//}
-
-//metricInfo := CustomMetricResource{
-//CustomMetricInfo: info,
-//NamespacedName:   namespacedName,
-//}
-//p.values[metricInfo] = *value
-//}
-
-// valueFor is a helper function to get just the value of a specific metric
-//func (p *StatsdProvider) valueFor(info provider.CustomMetricInfo, name types.NamespacedName) (resource.Quantity, error) {
-//info, _, err := info.Normalized(p.mapper)
-//if err != nil {
-//return resource.Quantity{}, err
-//}
-//metricInfo := CustomMetricResource{
-//CustomMetricInfo: info,
-//NamespacedName:   name,
-//}
-
-//value, found := p.values[metricInfo]
-//if !found {
-//return resource.Quantity{}, provider.NewMetricNotFoundForError(info.GroupResource, info.Metric, name.Name)
-//}
-
-//return value, nil
-//}
-
-// metricFor is a helper function which formats a value, metric, and object info into a MetricValue which can be returned by the metrics API
-//func (p *StatsdProvider) metricFor(value resource.Quantity, name types.NamespacedName, info provider.CustomMetricInfo) (*custom_metrics.MetricValue, error) {
-//objRef, err := helpers.ReferenceFor(p.mapper, name, info)
-//if err != nil {
-//return nil, err
-//}
-
-//return &custom_metrics.MetricValue{
-//DescribedObject: objRef,
-//MetricName:      info.Metric,
-//Timestamp:       metav1.Time{time.Now()},
-//Value:           value,
-//}, nil
-//}
-
-// metricsFor is a wrapper used by GetMetricBySelector to format several metrics which match a resource selector
-//func (p *StatsdProvider) metricsFor(namespace string, selector labels.Selector, info provider.CustomMetricInfo) (*custom_metrics.MetricValueList, error) {
-//names, err := helpers.ListObjectNames(p.mapper, p.client, namespace, selector, info)
-//if err != nil {
-//return nil, err
-//}
-
-//res := make([]custom_metrics.MetricValue, 0, len(names))
-//for _, name := range names {
-//namespacedName := types.NamespacedName{Name: name, Namespace: namespace}
-//value, err := p.valueFor(info, namespacedName)
-//if err != nil {
-//if apierr.IsNotFound(err) {
-//continue
-//}
-//return nil, err
-//}
-
-//metric, err := p.metricFor(value, namespacedName, info)
-//if err != nil {
-//return nil, err
-//}
-//res = append(res, *metric)
-//}
-
-//return &custom_metrics.MetricValueList{
-//Items: res,
-//}, nil
-//}
-
 func (p *StatsdProvider) GetMetricByName(name types.NamespacedName, info provider.CustomMetricInfo) (*custom_metrics.MetricValue, error) {
 	p.servicesLock.RLock()
 	defer p.servicesLock.RUnlock()
 
-	data, ok := p.services[info.Metric]
-	var count int64
-	if ok {
-		count = data.Count()
-	}
+	count := p.Count(info.Metric)
 
 	return &custom_metrics.MetricValue{
 		MetricName: info.Metric,
@@ -271,13 +167,17 @@ func (p *StatsdProvider) GetMetricByName(name types.NamespacedName, info provide
 func (p *StatsdProvider) GetMetricBySelector(namespace string, selector labels.Selector, info provider.CustomMetricInfo) (*custom_metrics.MetricValueList, error) {
 	p.servicesLock.RLock()
 	defer p.servicesLock.RUnlock()
-	metric, err := p.GetMetricByName(types.NamespacedName{Namespace: namespace, Name: info.Metric}, info)
-	if err != nil {
-		return nil, err
-	}
+
+	count := p.Count(info.Metric)
+
+	metric := custom_metrics.MetricValue{
+		MetricName: info.Metric,
+		Timestamp:  metav1.Time{time.Now()},
+		Value:      *resource.NewQuantity(count, resource.DecimalSI),
+	}, nil
 
 	return &custom_metrics.MetricValueList{
-		Items: []custom_metrics.MetricValue{*metric},
+		Items: []custom_metrics.MetricValue{metric},
 	}, nil
 }
 
@@ -285,7 +185,6 @@ func (p *StatsdProvider) ListAllMetrics() []provider.CustomMetricInfo {
 	p.servicesLock.RLock()
 	defer p.servicesLock.RUnlock()
 
-	// Build slice of CustomMetricInfos to be returns
 	metrics := make([]provider.CustomMetricInfo, 0, len(p.services))
 	for metricName := range p.services {
 		metrics = append(metrics, provider.CustomMetricInfo{
